@@ -1,7 +1,10 @@
 [package]
 name = "gawkurl"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 gawkurl-core = { path = "gawkurl-core" }
@@ -9,6 +12,12 @@ gawkurl-core = { path = "gawkurl-core" }
 [workspace]
 resolver = "3"
 members = ["gawkurl-server"]
+
+[workspace.package]
+edition = "2024"
+authors = ["Jamey Sharp <jamey@minilop.net>"]
+repository = "https://github.com/jameysharp/gawkurl"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 reqwest = { version = "0.12.22", default-features = false }
