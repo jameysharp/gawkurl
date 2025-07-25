@@ -5,7 +5,7 @@ use std::time::Duration;
 use base64::Engine;
 use blake2::{Blake2s, Digest, digest};
 use bytes::Bytes;
-use reqwest::Client;
+use reqwest::{Client, StatusCode, header};
 use tokio::sync::watch::{Receiver, Sender};
 
 #[derive(Clone)]
@@ -73,29 +73,61 @@ impl Pages {
     fn watch(self, uri: &String) -> Sender<Page> {
         let uri = uri.clone();
         tokio::spawn(async move {
+            let mut etag = None;
+            let mut last_modified = None;
             loop {
                 // fetch and hash the page
                 // TODO: ratelimit requests per domain
-                let response = self.client.get(&uri).send().await.unwrap();
-                // TODO: check response status and cache headers
-                let contents = response.bytes().await.unwrap();
+                let mut request = self.client.get(&uri);
+                if let Some(etag) = &etag {
+                    request = request.header(header::IF_NONE_MATCH, etag);
+                }
+                if let Some(last_modified) = &last_modified {
+                    request = request.header(header::IF_MODIFIED_SINCE, last_modified);
+                }
 
-                let hash_bytes = ContentHasher::digest(&contents);
-                let mut hash = ContentHash::default();
-                let hash_len = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode_slice(&hash_bytes, &mut hash);
-                debug_assert_eq!(hash_len, Ok(hash.len()));
+                if let Ok(response) = request.send().await {
+                    // per https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.3,
+                    // we're allowed to pretend like 5xx server errors were actually
+                    // the server just not responding, and reuse a cached response
+                    // instead. I'm choosing to do the same for all non-200 responses
+                    // but it's not clear yet if that's the right plan for this use.
+                    if response.status() == StatusCode::OK {
+                        etag = response.headers().get(header::ETAG).cloned();
+                        last_modified = response.headers().get(header::LAST_MODIFIED).cloned();
+                        let contents = response.bytes().await.unwrap();
 
-                // get the sender for this uri from self under a read lock and
-                // conditionally update the sender if the hash has changed
-                self.watching.read().unwrap()[&uri].send_if_modified(|page| {
-                    let modified = hash != page.hash;
-                    if modified {
-                        page.hash = hash;
-                        page.contents = contents;
+                        let hash_bytes = ContentHasher::digest(&contents);
+                        let mut hash = ContentHash::default();
+                        let hash_len = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode_slice(&hash_bytes, &mut hash);
+                        debug_assert_eq!(hash_len, Ok(hash.len()));
+
+                        // get the sender for this uri from self under a read lock and
+                        // conditionally update the sender if the hash has changed
+                        self.watching.read().unwrap()[&uri].send_if_modified(|page| {
+                            let modified = hash != page.hash;
+                            if modified {
+                                page.hash = hash;
+                                page.contents = contents;
+                            }
+                            modified
+                        });
+                    } else {
+                        // handling 304 Not Modified responses is specified in
+                        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4
+                        // but because we only store one response at a time and
+                        // never add synthetic if-modified-since headers, the
+                        // cases boil down to this: if the response has an etag and
+                        // it matches the etag we have from a previous response,
+                        // then we should update our stored copy's headers from
+                        // the new response. same goes for last-modified. but
+                        // if those headers match then there's nothing to update
+                        // since we don't track any other headers yet. so, like
+                        // 5xx responses, 304 should preserve the old response
+                        // unchanged.
                     }
-                    modified
-                });
+                }
 
                 // sleep, then loop
                 // TODO: choose delay by heuristics
