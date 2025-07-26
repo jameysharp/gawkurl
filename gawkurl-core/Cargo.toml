@@ -11,5 +11,6 @@ anyhow = "1.0.98"
 base64 = { version = "0.22.1", default-features = false }
 blake2 = { version = "0.10.6", default-features = false }
 bytes = { version = "1.10.1", default-features = false }
+httpdate = "1.0.3"
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt"] }

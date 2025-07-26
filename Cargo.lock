@@ -230,6 +230,7 @@ dependencies = [
  "base64",
  "blake2",
  "bytes",
+ "httpdate",
  "reqwest",
  "tokio",
 ]
