@@ -67,13 +67,14 @@ impl Pages {
                 .write()
                 .unwrap()
                 .entry(uri.to_owned())
-                .or_insert_with_key(|uri| self.clone().watch(uri))
+                .or_insert_with_key(|uri| Self::watch(self.client.clone(), uri.clone()))
                 .subscribe()
         }
     }
 
-    fn watch(self, uri: &String) -> Sender<Page> {
-        let uri = uri.clone();
+    fn watch(client: Client, uri: String) -> Sender<Page> {
+        let sender = Sender::new(Page::default());
+        let result = sender.clone();
         tokio::spawn(async move {
             const DAY: u64 = 86400;
 
@@ -98,11 +99,12 @@ impl Pages {
             // account what time it was when we fetched the latest version, as
             // well as the last-modified header, if we trust it.
             let mut last_changed = Instant::now();
+            let mut last_hash = ContentHash::default();
 
             loop {
                 // fetch and hash the page
                 // TODO: ratelimit requests per domain
-                let mut request = self.client.get(&uri);
+                let mut request = client.get(&uri);
                 if let Some(etag) = &etag {
                     request = request.header(header::IF_NONE_MATCH, etag);
                 }
@@ -160,19 +162,9 @@ impl Pages {
                             .encode_slice(&hash_bytes, &mut hash);
                         debug_assert_eq!(hash_len, Ok(hash.len()));
 
-                        // get the sender for this uri from self under a read lock and
-                        // conditionally update the sender if the hash has changed
-                        let modified =
-                            self.watching.read().unwrap()[&uri].send_if_modified(|page| {
-                                let modified = hash != page.hash;
-                                if modified {
-                                    page.hash = hash;
-                                    page.contents = contents;
-                                }
-                                modified
-                            });
-
-                        if modified {
+                        if last_hash != hash {
+                            last_hash = hash;
+                            sender.send_replace(Page { hash, contents });
                             last_changed = Instant::now();
 
                             // TODO: parse XML and look for RSS or Atom timestamps
@@ -237,7 +229,7 @@ impl Pages {
                 tokio::time::sleep(Duration::from_secs(wait)).await;
             }
         });
-        Sender::new(Page::default())
+        result
     }
 }
 
