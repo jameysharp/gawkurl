@@ -2,10 +2,10 @@ use std::time::{Duration, SystemTime};
 
 use base64::Engine;
 use blake2::{Blake2s, Digest, digest};
-use bytes::Bytes;
-use httpdate::HttpDate;
-use reqwest::{Client, StatusCode, header};
-use tokio::sync::watch::Sender;
+pub use bytes::Bytes;
+use http::{StatusCode, header};
+use http_body_util::BodyExt;
+pub use httpdate::HttpDate;
 use tokio::time::Instant;
 
 type ContentHasher = Blake2s<digest::consts::U6>;
@@ -22,12 +22,29 @@ pub struct Page {
     pub contents: Bytes,
 }
 
-pub async fn watch_url(client: Client, uri: String, sender: Sender<Page>) -> ! {
+pub trait Client {
+    type Error: std::error::Error;
+    type Body: http_body::Body<Error = Self::Error>;
+
+    fn fetch(
+        &self,
+        etag: Option<&header::HeaderValue>,
+        last_modified: Option<&HttpDate>,
+    ) -> impl Future<Output = Result<http::Response<Self::Body>, Self::Error>>;
+
+    fn changed(&self, page: Page);
+
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
+pub async fn watch_url(client: impl Client) -> ! {
     const DAY: u64 = 86400;
 
     // validators provided by the server
     let mut etag = None;
-    let mut last_modified: Option<HttpDate> = None;
+    let mut last_modified = None;
 
     // last_fetched is used to decide if the last-modified header is
     // plausible. if the page changed after our previous fetch, but
@@ -51,24 +68,19 @@ pub async fn watch_url(client: Client, uri: String, sender: Sender<Page>) -> ! {
     loop {
         // fetch and hash the page
         // TODO: ratelimit requests per domain
-        let mut request = client.get(&uri);
-        if let Some(etag) = &etag {
-            request = request.header(header::IF_NONE_MATCH, etag);
-        }
-        if let Some(last_modified) = &last_modified {
-            request = request.header(header::IF_MODIFIED_SINCE, last_modified.to_string());
-        }
 
         // if we don't get a server-provided max-age in response to
         // this request, treat it like the response can be revalidated
         // immediately.
         let mut max_age = 0;
 
-        let request_time = SystemTime::now();
-        if let Ok(response) = request.send().await {
-            let response_time = SystemTime::now();
+        let request_time = client.now();
+        if let Ok(response) = client.fetch(etag.as_ref(), last_modified.as_ref()).await {
+            let response_time = client.now();
 
-            let headers = response.headers();
+            let (parts, body) = response.into_parts();
+            let status = parts.status;
+            let headers = &parts.headers;
 
             // the date header indicates what time the origin server
             // generated this reponse, and if present allows us to
@@ -95,11 +107,12 @@ pub async fn watch_url(client: Client, uri: String, sender: Sender<Page>) -> ! {
             // the server just not responding, and reuse a cached response
             // instead. I'm choosing to do the same for all non-200 responses
             // but it's not clear yet if that's the right plan for this use.
-            if response.status() == StatusCode::OK {
+            if status == StatusCode::OK {
                 etag = headers.get(header::ETAG).cloned();
                 last_modified = parse(headers, header::LAST_MODIFIED);
 
-                let contents = response.bytes().await.unwrap();
+                // FIXME handle I/O errors while reading the response body
+                let contents = body.collect().await.unwrap().to_bytes();
 
                 let hash_bytes = ContentHasher::digest(&contents);
                 let mut hash = ContentHash::default();
@@ -109,7 +122,7 @@ pub async fn watch_url(client: Client, uri: String, sender: Sender<Page>) -> ! {
 
                 if last_hash != hash {
                     last_hash = hash;
-                    sender.send_replace(Page { hash, contents });
+                    client.changed(Page { hash, contents });
                     last_changed = Instant::now();
 
                     // TODO: parse XML and look for RSS or Atom timestamps

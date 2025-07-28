@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
-use bytes::Bytes;
-use gawkurl_core::{ContentHash, Page, watch_url};
+use gawkurl_core::{Bytes, ContentHash, HttpDate, Page, watch_url};
+use http::{HeaderValue, header};
 use http_body_util::Full;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Uri};
@@ -117,10 +117,47 @@ impl Pages {
                 .entry(uri.to_owned())
                 .or_insert_with_key(|uri| {
                     let sender = Sender::new(Page::default());
-                    tokio::spawn(watch_url(self.client.clone(), uri.clone(), sender.clone()));
+                    tokio::spawn(watch_url(ReqwestClient {
+                        client: self.client.clone(),
+                        uri: uri.clone(),
+                        sender: sender.clone(),
+                    }));
                     sender
                 })
                 .subscribe()
         }
+    }
+}
+
+pub struct ReqwestClient {
+    client: Client,
+    uri: String,
+    sender: Sender<Page>,
+}
+
+impl gawkurl_core::Client for ReqwestClient {
+    type Error = reqwest::Error;
+    type Body = reqwest::Body;
+
+    fn fetch(
+        &self,
+        etag: Option<&HeaderValue>,
+        last_modified: Option<&HttpDate>,
+    ) -> impl Future<Output = Result<http::Response<reqwest::Body>, reqwest::Error>> {
+        let mut request = self.client.get(&self.uri);
+        if let Some(etag) = etag {
+            request = request.header(header::IF_NONE_MATCH, etag);
+        }
+        if let Some(last_modified) = last_modified {
+            request = request.header(header::IF_MODIFIED_SINCE, last_modified.to_string());
+        }
+        async move {
+            let response = request.send().await;
+            response.map(Into::into)
+        }
+    }
+
+    fn changed(&self, page: Page) {
+        self.sender.send_replace(page);
     }
 }

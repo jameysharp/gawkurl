@@ -223,8 +223,10 @@ dependencies = [
  "base64",
  "blake2",
  "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
  "httpdate",
- "reqwest",
  "tokio",
 ]
 
@@ -232,7 +234,6 @@ dependencies = [
 name = "gawkurl-server"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "gawkurl-core",
  "http",
  "http-body-util",
