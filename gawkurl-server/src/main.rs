@@ -6,7 +6,7 @@ use bytes::Bytes;
 use gawkurl_core::{ContentHash, Page, watch_url};
 use http_body_util::Full;
 use hyper::service::service_fn;
-use hyper::{Response, StatusCode, Uri};
+use hyper::{Request, Response, StatusCode, Uri};
 use reqwest::Client;
 use tokio::net::TcpListener;
 use tokio::sync::watch::error::RecvError;
@@ -25,32 +25,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pages = pages.clone();
         let conn = server.serve_connection_with_upgrades(
             stream,
-            service_fn(move |req| {
-                let pages = pages.clone();
-                async move {
-                    let Some((action, uri)) = route(req.uri()) else {
-                        let mut response = Response::new("not found".into());
-                        *response.status_mut() = StatusCode::NOT_FOUND;
-                        return Ok::<_, Infallible>(response);
-                    };
-
-                    let response = match action {
-                        "cached" => pages.wait_for_change(uri, "").await,
-                        _ => pages.wait_for_change(uri, action).await,
-                    };
-
-                    match response {
-                        Ok(contents) => Ok(Response::new(Full::new(contents))),
-                        Err(e) => {
-                            let mut response = Response::new(e.to_string().into());
-                            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                            Ok(response)
-                        }
-                    }
-                }
-            }),
+            service_fn(move |req| service(req, pages.clone())),
         );
         tokio::spawn(conn.into_owned());
+    }
+}
+
+async fn service<B>(req: Request<B>, pages: Pages) -> Result<Response<Full<Bytes>>, Infallible> {
+    let Some((action, uri)) = route(req.uri()) else {
+        let mut response = Response::new("not found".into());
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        return Ok(response);
+    };
+
+    let response = match action {
+        "cached" => pages.wait_for_change(uri, "").await,
+        _ => pages.wait_for_change(uri, action).await,
+    };
+
+    match response {
+        Ok(contents) => Ok(Response::new(Full::new(contents))),
+        Err(e) => {
+            let mut response = Response::new(e.to_string().into());
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            Ok(response)
+        }
     }
 }
 
