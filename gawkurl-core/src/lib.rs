@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use base64::Engine;
@@ -7,77 +5,24 @@ use blake2::{Blake2s, Digest, digest};
 use bytes::Bytes;
 use httpdate::HttpDate;
 use reqwest::{Client, StatusCode, header};
-use tokio::sync::watch::{Receiver, Sender};
+use tokio::sync::watch::Sender;
 use tokio::time::Instant;
-
-#[derive(Clone)]
-pub struct Pages {
-    watching: Arc<RwLock<HashMap<String, Sender<Page>>>>,
-    client: Client,
-}
 
 type ContentHasher = Blake2s<digest::consts::U6>;
 
-type ContentHash = [u8; {
+pub type ContentHash = [u8; {
     let bytes_len: usize = <<ContentHasher as digest::OutputSizeUser>::OutputSize as digest::typenum::ToInt<usize>>::INT;
     assert!(bytes_len % 3 == 0);
     bytes_len * 4 / 3
 }];
 
 #[derive(Default)]
-struct Page {
-    hash: ContentHash,
-    contents: Bytes,
+pub struct Page {
+    pub hash: ContentHash,
+    pub contents: Bytes,
 }
 
-impl Pages {
-    pub fn new(client: Client) -> Pages {
-        Pages {
-            watching: Default::default(),
-            client,
-        }
-    }
-
-    pub async fn wait_for_change(&self, uri: &str, seen: &str) -> anyhow::Result<Bytes> {
-        let mut changes = self.lookup(uri);
-
-        loop {
-            {
-                let current = changes.borrow_and_update();
-                if current.hash != ContentHash::default() && current.hash != seen.as_bytes() {
-                    return Ok(current.contents.clone());
-                }
-            }
-            changes.changed().await?;
-        }
-    }
-
-    fn lookup(&self, uri: &str) -> Receiver<Page> {
-        // optimistically assume that this uri is already in the map, and look
-        // it up with only a read lock held, to avoid blocking other lookups
-        // happening in parallel
-        if let Some(page) = self.watching.read().unwrap().get(uri) {
-            page.subscribe()
-        } else {
-            // if it wasn't there, try again with a write lock, which blocks all
-            // other lookups until it's done so we can add the entry to the map.
-            // however we may have raced with another writer so we might find we
-            // actually do find it this time
-            self.watching
-                .write()
-                .unwrap()
-                .entry(uri.to_owned())
-                .or_insert_with_key(|uri| {
-                    let sender = Sender::new(Page::default());
-                    tokio::spawn(watch_url(self.client.clone(), uri.clone(), sender.clone()));
-                    sender
-                })
-                .subscribe()
-        }
-    }
-}
-
-async fn watch_url(client: Client, uri: String, sender: Sender<Page>) -> ! {
+pub async fn watch_url(client: Client, uri: String, sender: Sender<Page>) -> ! {
     const DAY: u64 = 86400;
 
     // validators provided by the server
