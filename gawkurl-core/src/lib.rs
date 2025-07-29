@@ -27,19 +27,19 @@ pub trait Client {
     type Body: http_body::Body<Error = Self::Error>;
 
     fn fetch(
-        &self,
+        &mut self,
         etag: Option<&header::HeaderValue>,
         last_modified: Option<&HttpDate>,
     ) -> impl Future<Output = Result<http::Response<Self::Body>, Self::Error>>;
 
-    fn changed(&self, page: Page);
+    fn changed(&mut self, page: Page);
 
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }
 }
 
-pub async fn watch_url(client: impl Client) -> ! {
+pub async fn watch_url(mut client: impl Client) -> ! {
     const DAY: u64 = 86400;
 
     // validators provided by the server

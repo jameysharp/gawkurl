@@ -140,7 +140,7 @@ impl gawkurl_core::Client for ReqwestClient {
     type Body = reqwest::Body;
 
     fn fetch(
-        &self,
+        &mut self,
         etag: Option<&HeaderValue>,
         last_modified: Option<&HttpDate>,
     ) -> impl Future<Output = Result<http::Response<reqwest::Body>, reqwest::Error>> {
@@ -157,7 +157,7 @@ impl gawkurl_core::Client for ReqwestClient {
         }
     }
 
-    fn changed(&self, page: Page) {
+    fn changed(&mut self, page: Page) {
         self.sender.send_replace(page);
     }
 }
