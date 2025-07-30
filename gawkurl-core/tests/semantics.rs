@@ -260,6 +260,56 @@ fn last_modified_dos_epoch() {
     });
 }
 
+#[test]
+fn respect_max_age() {
+    run(async |mut call| {
+        call.fetch(async |_request| {
+            let mut response = Response::new(Full::new(Bytes::new()));
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_static("max-age=86400"),
+            );
+            response
+        })
+        .await;
+        let last_fetch = Instant::now();
+        call.changed().await;
+
+        call.fetch(async |_request| {
+            assert_eq!(last_fetch.elapsed().as_secs(), 86400);
+            Response::new(Full::new(Bytes::new()))
+        })
+        .await;
+    });
+}
+
+#[test]
+fn respect_expires() {
+    run(async |mut call| {
+        call.fetch(async |_request| {
+            let mut response = Response::new(Full::new(Bytes::new()));
+            response.headers_mut().insert(
+                header::DATE,
+                header::HeaderValue::from_static("Fri, 01 Jan 2010 00:00:00 GMT"),
+            );
+            response.headers_mut().insert(
+                header::EXPIRES,
+                header::HeaderValue::from_static("Sun, 03 Jan 2010 00:00:00 GMT"),
+            );
+            response
+        })
+        .await;
+        let last_fetch = Instant::now();
+        call.changed().await;
+
+        call.fetch(async |_request| {
+            assert_eq!(last_fetch.elapsed().as_secs(), 2 * 86400);
+            Response::new(Full::new(Bytes::new()))
+        })
+        .await;
+    });
+}
+
 struct TestClient {
     start: Instant,
     call: mpsc::UnboundedSender<Call>,
