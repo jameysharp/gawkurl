@@ -16,10 +16,21 @@ pub type ContentHash = [u8; {
     bytes_len * 4 / 3
 }];
 
-#[derive(Default)]
+#[non_exhaustive]
 pub struct Page {
-    pub hash: ContentHash,
     pub contents: Bytes,
+    pub hash: ContentHash,
+    pub last_changed: Instant,
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Self {
+            contents: Bytes::new(),
+            hash: ContentHash::default(),
+            last_changed: Instant::now(),
+        }
+    }
 }
 
 pub trait Client {
@@ -122,7 +133,6 @@ pub async fn watch_url(mut client: impl Client) -> ! {
 
                 if last_hash != hash {
                     last_hash = hash;
-                    client.changed(Page { hash, contents });
                     last_changed = Instant::now();
 
                     // TODO: parse XML and look for RSS or Atom timestamps
@@ -144,6 +154,12 @@ pub async fn watch_url(mut client: impl Client) -> ! {
                             }
                         }
                     }
+
+                    client.changed(Page {
+                        contents,
+                        hash,
+                        last_changed,
+                    });
                 }
             } else {
                 // handling 304 Not Modified responses is specified in

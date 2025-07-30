@@ -139,6 +139,127 @@ fn unchanged_304() {
     });
 }
 
+#[test]
+fn last_modified() {
+    run(async |mut call| {
+        let mut last_modified = None;
+
+        // The first request will consider last-modified to be plausible even if
+        // it's long ago.
+        call.fetch(async |request| {
+            assert_eq!(request.last_modified, last_modified);
+            let date = header::HeaderValue::from_static("Fri, 01 Jan 2010 00:00:00 GMT");
+            let modified = header::HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT");
+            last_modified = Some(modified.to_str().unwrap().parse().unwrap());
+
+            let mut response = Response::new(Full::new(Bytes::from_static(b"1")));
+            let headers = response.headers_mut();
+            headers.insert(header::DATE, date);
+            headers.insert(header::LAST_MODIFIED, modified);
+            response
+        })
+        .await;
+
+        assert_eq!(
+            call.changed().await.last_changed.elapsed().as_secs(),
+            478192223
+        );
+
+        // Subsequent requests require last-modified to be more recent than the
+        // last time we fetched this page, taking clock skew and the age header
+        // into account.
+        call.fetch(async |request| {
+            assert_eq!(request.last_modified, last_modified);
+            let date = header::HeaderValue::from_static("Fri, 01 Jan 2010 00:10:00 GMT");
+            let modified = header::HeaderValue::from_static("Fri, 01 Jan 2010 00:05:00 GMT");
+            last_modified = Some(modified.to_str().unwrap().parse().unwrap());
+
+            let mut response = Response::new(Full::new(Bytes::from_static(b"2")));
+            let headers = response.headers_mut();
+            headers.insert(header::DATE, date);
+            headers.insert(header::LAST_MODIFIED, modified);
+            headers.insert(header::AGE, header::HeaderValue::from_static("5"));
+            response
+        })
+        .await;
+
+        assert_eq!(call.changed().await.last_changed.elapsed().as_secs(), 305);
+
+        // If last-modified is implausible, we approximate the last change time
+        // as being right now, the moment we observed the change.
+        call.fetch(async |request| {
+            assert_eq!(request.last_modified, last_modified);
+            let date = header::HeaderValue::from_static("Fri, 01 Jan 2010 00:20:00 GMT");
+            let modified = header::HeaderValue::from_static("Fri, 01 Jan 2010 00:00:00 GMT");
+            last_modified = Some(modified.to_str().unwrap().parse().unwrap());
+
+            let mut response = Response::new(Full::new(Bytes::from_static(b"3")));
+            let headers = response.headers_mut();
+            headers.insert(header::DATE, date);
+            headers.insert(header::LAST_MODIFIED, modified);
+            response
+        })
+        .await;
+
+        assert_eq!(call.changed().await.last_changed.elapsed().as_secs(), 0);
+
+        // If the server takes some time to produce the response, we count that
+        // time as part of the age of the response.
+        call.fetch(async |request| {
+            assert_eq!(request.last_modified, last_modified);
+            let date = header::HeaderValue::from_static("Fri, 01 Jan 2010 00:30:00 GMT");
+            let modified = header::HeaderValue::from_static("Fri, 01 Jan 2010 00:25:00 GMT");
+            last_modified = Some(modified.to_str().unwrap().parse().unwrap());
+
+            let mut response = Response::new(Full::new(Bytes::from_static(b"4")));
+            let headers = response.headers_mut();
+            headers.insert(header::DATE, date);
+            headers.insert(header::LAST_MODIFIED, modified);
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            response
+        })
+        .await;
+
+        assert_eq!(call.changed().await.last_changed.elapsed().as_secs(), 307);
+    });
+}
+
+#[test]
+fn last_modified_unix_epoch() {
+    run(async |mut call| {
+        // A pre-web last-modified should always be implausible.
+        call.fetch(async |_request| {
+            let mut response = Response::new(Full::new(Bytes::new()));
+            response.headers_mut().insert(
+                header::LAST_MODIFIED,
+                header::HeaderValue::from_static("Thu, 01 Jan 1970 00:00:00 GMT"),
+            );
+            response
+        })
+        .await;
+
+        assert_eq!(call.changed().await.last_changed.elapsed().as_secs(), 0);
+    });
+}
+
+#[test]
+fn last_modified_dos_epoch() {
+    run(async |mut call| {
+        // A pre-web last-modified should always be implausible.
+        call.fetch(async |_request| {
+            let mut response = Response::new(Full::new(Bytes::new()));
+            response.headers_mut().insert(
+                header::LAST_MODIFIED,
+                header::HeaderValue::from_static("Tue, 01 Jan 1980 00:00:00 GMT"),
+            );
+            response
+        })
+        .await;
+
+        assert_eq!(call.changed().await.last_changed.elapsed().as_secs(), 0);
+    });
+}
+
 struct TestClient {
     start: Instant,
     call: mpsc::UnboundedSender<Call>,
