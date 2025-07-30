@@ -261,6 +261,34 @@ fn last_modified_dos_epoch() {
 }
 
 #[test]
+fn ignore_server_errors() {
+    run(async |mut call| {
+        // 5xx response status codes should not trigger change notifications.
+        call.fetch(async |_request| {
+            let mut response = Response::new(Full::new(Bytes::new()));
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        })
+        .await;
+
+        call.fetch(async |_request| Response::new(Full::new(Bytes::new())))
+            .await;
+
+        assert_eq!(call.changed().await.contents, Bytes::new());
+
+        call.fetch(async |_request| {
+            let mut response = Response::new(Full::new(Bytes::new()));
+            *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            response
+        })
+        .await;
+
+        call.fetch(async |_request| Response::new(Full::new(Bytes::new())))
+            .await;
+    });
+}
+
+#[test]
 fn respect_max_age() {
     run(async |mut call| {
         call.fetch(async |_request| {
