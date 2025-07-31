@@ -38,13 +38,31 @@ async fn service<B>(req: Request<B>, pages: Pages) -> Result<Response<Full<Bytes
         return Ok(response);
     };
 
-    let response = match action {
+    let result = match action {
         "cached" => pages.wait_for_change(uri, "").await,
         _ => pages.wait_for_change(uri, action).await,
     };
 
-    match response {
-        Ok(contents) => Ok(Response::new(Full::new(contents))),
+    match result {
+        Ok(page) => {
+            let mut response = Response::new(Full::new(page.contents));
+            let headers = response.headers_mut();
+            headers.insert(
+                header::HeaderName::from_static("next-version"),
+                header::HeaderValue::from_str(&format!(
+                    "/{}/{}",
+                    str::from_utf8(&page.hash).unwrap(),
+                    uri
+                ))
+                .unwrap(),
+            );
+            headers.insert(
+                header::HeaderName::from_static("last-changed"),
+                header::HeaderValue::from_str(&page.last_changed.elapsed().as_secs().to_string())
+                    .unwrap(),
+            );
+            Ok(response)
+        }
         Err(e) => {
             let mut response = Response::new(e.to_string().into());
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
@@ -86,13 +104,13 @@ impl Pages {
         }
     }
 
-    pub async fn wait_for_change(&self, uri: &str, seen: &str) -> Result<Bytes, RecvError> {
+    pub async fn wait_for_change(&self, uri: &str, seen: &str) -> Result<Page, RecvError> {
         let mut changes = self.lookup(uri);
 
         loop {
             if let Some(current) = &*changes.borrow_and_update() {
                 if current.hash != seen.as_bytes() {
-                    return Ok(current.contents.clone());
+                    return Ok(current.clone());
                 }
             }
             changes.changed().await?;

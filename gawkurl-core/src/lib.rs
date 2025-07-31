@@ -16,6 +16,7 @@ pub type ContentHash = [u8; {
     bytes_len * 4 / 3
 }];
 
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Page {
     pub contents: Bytes,
