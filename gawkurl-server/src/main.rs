@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
-use gawkurl_core::{Bytes, ContentHash, HttpDate, Page, watch_url};
+use gawkurl_core::{Bytes, HttpDate, Page, watch_url};
 use http::{HeaderValue, header};
 use http_body_util::Full;
 use hyper::service::service_fn;
@@ -74,7 +74,7 @@ fn route(uri: &Uri) -> Option<(&str, &str)> {
 
 #[derive(Clone)]
 pub struct Pages {
-    watching: Arc<RwLock<HashMap<String, Sender<Page>>>>,
+    watching: Arc<RwLock<HashMap<String, Sender<Option<Page>>>>>,
     client: Client,
 }
 
@@ -90,9 +90,8 @@ impl Pages {
         let mut changes = self.lookup(uri);
 
         loop {
-            {
-                let current = changes.borrow_and_update();
-                if current.hash != ContentHash::default() && current.hash != seen.as_bytes() {
+            if let Some(current) = &*changes.borrow_and_update() {
+                if current.hash != seen.as_bytes() {
                     return Ok(current.contents.clone());
                 }
             }
@@ -100,7 +99,7 @@ impl Pages {
         }
     }
 
-    fn lookup(&self, uri: &str) -> Receiver<Page> {
+    fn lookup(&self, uri: &str) -> Receiver<Option<Page>> {
         // optimistically assume that this uri is already in the map, and look
         // it up with only a read lock held, to avoid blocking other lookups
         // happening in parallel
@@ -116,7 +115,7 @@ impl Pages {
                 .unwrap()
                 .entry(uri.to_owned())
                 .or_insert_with_key(|uri| {
-                    let sender = Sender::new(Page::default());
+                    let sender = Sender::new(None);
                     tokio::spawn(watch_url(ReqwestClient {
                         client: self.client.clone(),
                         uri: uri.clone(),
@@ -132,7 +131,7 @@ impl Pages {
 pub struct ReqwestClient {
     client: Client,
     uri: String,
-    sender: Sender<Page>,
+    sender: Sender<Option<Page>>,
 }
 
 impl gawkurl_core::Client for ReqwestClient {
@@ -158,6 +157,6 @@ impl gawkurl_core::Client for ReqwestClient {
     }
 
     fn changed(&mut self, page: Page) {
-        self.sender.send_replace(page);
+        self.sender.send_replace(Some(page));
     }
 }

@@ -23,16 +23,6 @@ pub struct Page {
     pub last_changed: Instant,
 }
 
-impl Default for Page {
-    fn default() -> Self {
-        Self {
-            contents: Bytes::new(),
-            hash: ContentHash::default(),
-            last_changed: Instant::now(),
-        }
-    }
-}
-
 pub trait Client {
     type Error: std::error::Error;
     type Body: http_body::Body<Error = Self::Error>;
