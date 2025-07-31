@@ -48,6 +48,14 @@ async fn service<B>(req: Request<B>, pages: Pages) -> Result<Response<Full<Bytes
             let mut response = Response::new(Full::new(page.contents));
             let headers = response.headers_mut();
             headers.insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                header::HeaderValue::from_static("*"),
+            );
+            headers.insert(
+                header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                header::HeaderValue::from_static("next-version, last-changed"),
+            );
+            headers.insert(
                 header::HeaderName::from_static("next-version"),
                 header::HeaderValue::from_str(&format!(
                     "/{}/{}",
