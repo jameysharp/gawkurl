@@ -11,7 +11,7 @@ gawkurl-core = { path = "gawkurl-core" }
 
 [workspace]
 resolver = "3"
-members = ["gawkurl-server"]
+members = ["gawkurl-server", "hawkurl"]
 
 [workspace.package]
 edition = "2024"
