@@ -301,6 +301,10 @@ async fn wait_for_hash_change(conn: Conn) -> Conn {
             }
             _ => {}
         }
-        conn_try!(notify.changed().await, conn);
+        // wait until the page changes, but interrupt at server shutdown
+        conn_try!(
+            conn_unwrap!(conn.swansong().interrupt(notify.changed()).await, conn),
+            conn
+        );
     }
 }
