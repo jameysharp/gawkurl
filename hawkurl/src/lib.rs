@@ -58,20 +58,30 @@ struct Subscription {
     url: String,
     id: Option<String>,
     lease_expires: Option<SystemTime>,
-    notify: Sender<Option<Page>>,
+    notify: Sender<Page>,
 }
 
 impl Subscription {
     fn new(url: String, client: &Client) -> Self {
-        let notify = Sender::new(None);
+        let notify = Sender::new(Page::Pending);
         client.connector().runtime().spawn({
             let url = url.clone();
             let client = client.clone();
             let notify = notify.clone();
             async move {
-                let mut conn = client.get(url).await.unwrap();
-                let content = conn.response_body().read_bytes().await.unwrap();
-                notify.send_replace(Some(Page::from_http(content, conn.response_headers())));
+                let page = match client.get(url).await {
+                    Ok(mut conn) => match conn.status().unwrap() {
+                        Status::Ok => match conn.response_body().read_bytes().await {
+                            Ok(body) => Page::from_http(body, conn.response_headers()),
+                            Err(e) => Page::Failed(e),
+                        },
+                        status => Page::Failed(trillium_client::Error::Other(
+                            format!("got status {status}").into(),
+                        )),
+                    },
+                    Err(e) => Page::Failed(e),
+                };
+                notify.send_replace(page);
             }
         });
         Subscription {
@@ -103,13 +113,16 @@ impl Subscription {
         // FIXME ensure this can't send multiple subscription requests
         // FIXME handle the case where verification of intent never arrived
         client.connector().runtime().spawn(async move {
-            if notify.borrow_and_update().is_none() {
-                notify.changed().await.unwrap();
-            }
-            let page = notify.borrow().clone().unwrap();
-
             let base = Url::parse(&url).unwrap();
-            let mut hub = base.join(&page.hub).unwrap();
+            let mut hub = loop {
+                match &*notify.borrow_and_update() {
+                    Page::Pending => {}
+                    Page::Failed(_) => return,
+                    Page::Ready { hub, .. } => break base.join(hub).unwrap(),
+                }
+                notify.changed().await.unwrap();
+            };
+
             hub.query_pairs_mut()
                 .append_pair("hub.callback", &callback)
                 .append_pair("hub.mode", "subscribe")
@@ -121,12 +134,15 @@ impl Subscription {
     }
 }
 
-#[derive(Clone)]
-struct Page {
-    hub: String,
-    content_type: String,
-    content: Vec<u8>,
-    hash: ContentHash,
+enum Page {
+    Pending,
+    Failed(trillium_client::Error),
+    Ready {
+        hub: String,
+        content_type: String,
+        content: Vec<u8>,
+        hash: ContentHash,
+    },
 }
 
 impl Page {
@@ -143,22 +159,22 @@ impl Page {
 
         let mut hub = String::new();
         if let Some(links) = headers.get_values(KnownHeaderName::Link) {
-            for link in links {
-                let Some(link) = link.as_str() else { continue };
-                let link = parse_link_header::parse_with_rel(link).unwrap();
+            for link_map in links
+                .iter()
+                .filter_map(|v| parse_link_header::parse_with_rel(v.as_str()?).ok())
+            {
                 // FIXME what if multiple hubs?
-                let Some(link) = link.get("hub") else {
-                    continue;
-                };
-                hub = link.raw_uri.clone();
-                break;
+                if let Some(link) = link_map.get("hub") {
+                    hub = link.raw_uri.clone();
+                    break;
+                }
             }
         }
 
         // TODO also look in HTML/XML documents
         // FIXME what if no hub?
 
-        Page {
+        Page::Ready {
             hub,
             content_type,
             content,
@@ -228,12 +244,13 @@ async fn notify(mut conn: Conn) -> Conn {
     let content = conn_try!(conn.request_body().read_bytes().await, conn);
     let subs: &Subscriptions = conn.shared_state().unwrap();
     let id = conn.param("id").unwrap();
-    // TODO return 410 Gone
-    let sub = conn_unwrap!(subs.by_id(id), conn);
+    let Some(sub) = subs.by_id(id) else {
+        return conn.with_status(Status::Gone).halt();
+    };
     let sub = sub.lock().unwrap();
     debug_assert_eq!(sub.id.as_deref(), Some(id));
     sub.notify
-        .send_replace(Some(Page::from_http(content, conn.request_headers())));
+        .send_replace(Page::from_http(content, conn.request_headers()));
     conn.ok("")
 }
 
@@ -255,24 +272,34 @@ async fn wait_for_hash_change(conn: Conn) -> Conn {
     let mut notify = {
         let mut sub = sub.lock().unwrap();
         debug_assert_eq!(sub.url, url);
-        if !expected_hash.is_empty() {
+        if expected_hash != ContentHash::default() {
             sub.ensure_subscription(subs, client, &base_url);
         }
         sub.notify.subscribe()
     };
     loop {
-        if let Some(current) = &*notify.borrow_and_update() {
-            if current.hash != expected_hash {
-                let current = current.clone();
-                let next_version = format!(
-                    "{base_url}/{}/{url}",
-                    str::from_utf8(&current.hash).unwrap()
-                );
+        match &*notify.borrow_and_update() {
+            Page::Failed(err) => {
                 return conn
-                    .with_response_header(KnownHeaderName::ContentType, current.content_type)
-                    .with_response_header("next-version", next_version)
-                    .ok(current.content);
+                    .with_status(Status::BadGateway)
+                    .with_body(format!(
+                        "something went wrong fetching the page you asked for: {err}"
+                    ))
+                    .halt();
             }
+            Page::Ready {
+                hash,
+                content_type,
+                content,
+                ..
+            } if hash != &expected_hash => {
+                let next_version = format!("{base_url}/{}/{url}", str::from_utf8(hash).unwrap());
+                return conn
+                    .with_response_header("next-version", next_version)
+                    .with_response_header(KnownHeaderName::ContentType, content_type.clone())
+                    .ok(content.clone());
+            }
+            _ => {}
         }
         conn_try!(notify.changed().await, conn);
     }
