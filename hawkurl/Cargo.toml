@@ -18,5 +18,5 @@ trillium-client = "0.9.5"
 trillium-router = "0.5.1"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["sync"] }
+futures-lite = { version = "2.6.1", default-features = false }
 trillium-testing = { version = "0.10.0", default-features = false }

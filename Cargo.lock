@@ -661,6 +661,7 @@ dependencies = [
  "base64",
  "blake2",
  "form_urlencoded",
+ "futures-lite",
  "parse_link_header",
  "rand 0.10.1",
  "tokio",
