@@ -60,14 +60,16 @@ async fn not_found() {
 
 #[test(harness)]
 async fn basic() {
-    let (app, mut receiver) = mock_server(|conn| {
-        conn.with_response_header(KnownHeaderName::ContentType, "text/plain")
-            .with_response_header(
-                KnownHeaderName::Link,
-                "<https://origin.example/>; rel=\"self\"",
-            )
-            .with_response_header(KnownHeaderName::Link, "<https://hub.example/>; rel=\"hub\"")
-            .ok("hello")
+    use KnownHeaderName::{ContentType, Link};
+    const HEADERS: [(KnownHeaderName, &str); 3] = [
+        (ContentType, "text/plain"),
+        (Link, "<https://origin.example/>; rel=\"self\""),
+        (Link, "<https://hub.example/>; rel=\"hub\""),
+    ];
+
+    let (app, mut receiver) = mock_server(|mut conn| {
+        conn.response_headers_mut().extend(HEADERS);
+        conn.ok("hello")
     })
     .await;
 
@@ -107,7 +109,7 @@ async fn basic() {
                 .assert_body(challenge);
 
             app.post(request.callback.as_str())
-                .with_request_header(KnownHeaderName::ContentType, "text/plain")
+                .with_request_headers(HEADERS)
                 .with_body("goodbye")
                 .await
                 .assert_ok();
@@ -136,7 +138,7 @@ async fn basic() {
         },
         async {
             app.post(callback.as_str())
-                .with_request_header(KnownHeaderName::ContentType, "text/plain")
+                .with_request_headers(HEADERS)
                 .with_body("limbo")
                 .await
                 .assert_ok();
