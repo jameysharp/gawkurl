@@ -254,11 +254,11 @@ async fn notify(mut conn: Conn) -> Conn {
     conn.ok("")
 }
 
-async fn wait_for_hash_change(conn: Conn) -> Conn {
+async fn wait_for_hash_change(mut conn: Conn) -> Conn {
     let subs: &Subscriptions = conn.shared_state().unwrap();
     let ClientWrapper(client) = conn.shared_state().unwrap();
     // TODO append query string
-    let url = conn.wildcard().unwrap();
+    let url = conn.wildcard().unwrap().to_owned();
     let expected_hash = conn
         .param("hash")
         .and_then(|s| ContentHash::try_from(s.as_bytes()).ok())
@@ -268,7 +268,7 @@ async fn wait_for_hash_change(conn: Conn) -> Conn {
         if conn.is_secure() { "https" } else { "http" },
         conn.host().unwrap()
     );
-    let sub = subs.by_url(url, client);
+    let sub = subs.by_url(&url, client);
     let mut notify = {
         let mut sub = sub.lock().unwrap();
         debug_assert_eq!(sub.url, url);
@@ -301,10 +301,12 @@ async fn wait_for_hash_change(conn: Conn) -> Conn {
             }
             _ => {}
         }
-        // wait until the page changes, but interrupt at server shutdown
-        conn_try!(
-            conn_unwrap!(conn.swansong().interrupt(notify.changed()).await, conn),
-            conn
-        );
+        // wait until the page changes, but interrupt at server shutdown or client disconnect
+        let Some(Some(Ok(()))) = conn
+            .cancel_on_disconnect(conn.swansong().interrupt(notify.changed()))
+            .await
+        else {
+            return conn;
+        };
     }
 }
