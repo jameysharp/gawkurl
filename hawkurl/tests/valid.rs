@@ -50,6 +50,15 @@ async fn mock_server(
 }
 
 #[test(harness)]
+async fn not_found() {
+    let (app, receiver) = mock_server(|conn| conn.with_status(Status::NotFound).halt()).await;
+    app.get("/cached/https://origin.example")
+        .await
+        .assert_status(Status::BadGateway);
+    assert!(receiver.is_empty());
+}
+
+#[test(harness)]
 async fn basic() {
     let (app, mut receiver) = mock_server(|conn| {
         conn.with_response_header(KnownHeaderName::ContentType, "text/plain")
@@ -62,20 +71,21 @@ async fn basic() {
     })
     .await;
 
-    let cached = app.get("/cached/https://origin.example").await;
-    cached
-        .assert_ok()
+    let v1 = app.get("/cached/https://origin.example").await;
+    v1.assert_ok()
         .assert_header("Content-Type", "text/plain")
         .assert_body("hello");
     assert!(receiver.is_empty());
 
-    futures_lite::future::zip(
+    let (v2, callback) = futures_lite::future::zip(
         async {
-            app.get(cached.header("Next-Version").expect("HATEOAS header"))
-                .await
-                .assert_ok()
+            let next = v1.header("Next-Version").expect("HATEOAS header");
+            let v2 = app.get(next).await;
+            v2.assert_ok()
                 .assert_header("Content-Type", "text/plain")
                 .assert_body("goodbye");
+            assert_ne!(next, v2.header("Next-Version").unwrap());
+            v2
         },
         async {
             let request = receiver.recv().await.expect("hub request");
@@ -101,7 +111,37 @@ async fn basic() {
                 .with_body("goodbye")
                 .await
                 .assert_ok();
+
+            request.callback
         },
     )
     .await;
+    assert!(receiver.is_empty());
+
+    app.get("/cached/https://origin.example")
+        .await
+        .assert_ok()
+        .assert_header("Next-Version", v2.header("Next-Version").unwrap())
+        .assert_header("Content-Type", "text/plain")
+        .assert_body("goodbye");
+
+    futures_lite::future::zip(
+        async {
+            let next = v2.header("Next-Version").expect("HATEOAS header");
+            let v3 = app.get(next).await;
+            v3.assert_ok()
+                .assert_header("Content-Type", "text/plain")
+                .assert_body("limbo");
+            assert_ne!(next, v3.header("Next-Version").unwrap());
+        },
+        async {
+            app.post(callback.as_str())
+                .with_request_header(KnownHeaderName::ContentType, "text/plain")
+                .with_body("limbo")
+                .await
+                .assert_ok();
+        },
+    )
+    .await;
+    assert!(receiver.is_empty());
 }
