@@ -1,6 +1,6 @@
 use hawkurl::handler;
 use tokio::sync::mpsc;
-use trillium::{Conn, Handler, KnownHeaderName, Status};
+use trillium::{Conn, Handler, KnownHeaderName, Method, Status};
 use trillium_client::{Client, Url};
 use trillium_testing::{ServerConnector, TestServer, harness, test};
 
@@ -21,6 +21,7 @@ async fn mock_server(
         let conn = match conn.host() {
             Some("origin.example") => mock_origin(conn),
             Some("hub.example") => {
+                assert_eq!(conn.method(), Method::Post);
                 let mut callback = None;
                 let mut mode = None;
                 let mut topic = None;

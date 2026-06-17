@@ -129,7 +129,7 @@ impl Subscription {
                 .append_pair("hub.mode", "subscribe")
                 .append_pair("hub.topic", &url)
                 .finish();
-            let response = client.get(hub).await.unwrap();
+            let response = client.post(hub).await.unwrap();
             assert!(response.status().unwrap() == Status::Accepted);
         });
     }
