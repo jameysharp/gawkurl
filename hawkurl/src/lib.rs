@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use base64::Engine;
 use blake2::{Blake2s, Digest, digest};
+use nom_rfc8288::complete::link_lenient;
 use rand::RngExt;
 use tokio::sync::watch::Sender;
 use trillium::{Conn, Handler, Headers, Init, KnownHeaderName, Status, conn_try, conn_unwrap};
@@ -158,15 +159,24 @@ impl Page {
         debug_assert_eq!(hash_len, Ok(hash.len()));
 
         let mut hub = String::new();
-        if let Some(links) = headers.get_values(KnownHeaderName::Link) {
-            for link_map in links
-                .iter()
-                .filter_map(|v| parse_link_header::parse_with_rel(v.as_str()?).ok())
-            {
-                // FIXME what if multiple hubs?
-                if let Some(link) = link_map.get("hub") {
-                    hub = link.raw_uri.clone();
-                    break;
+        for header in headers
+            .get_values(KnownHeaderName::Link)
+            .map_or(&[][..], |v| &*v)
+        {
+            let Some(s) = header.as_str() else { continue };
+            for link in link_lenient(s).unwrap_or_default() {
+                let Some(link) = link else { continue };
+                if let Some(rel) = link
+                    .params
+                    .iter()
+                    .find_map(|p| p.val.as_ref().filter(|_| p.key == "rel"))
+                {
+                    // FIXME what if multiple hubs?
+                    if rel == "hub" {
+                        hub = link.url.to_owned();
+                        break;
+                    }
+                    // TODO also get rel=self link
                 }
             }
         }
