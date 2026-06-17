@@ -29,7 +29,7 @@ struct Inner {
 }
 
 impl Subscriptions {
-    fn by_url(&self, url: &str, client: &Client) -> Arc<Mutex<Subscription>> {
+    fn by_url(&self, url: &str, ClientWrapper(client): &ClientWrapper) -> Arc<Mutex<Subscription>> {
         if let Some(sub) = self.0.read().unwrap().by_url.get(url) {
             sub.clone()
         } else {
@@ -46,19 +46,12 @@ impl Subscriptions {
     fn by_id(&self, id: &str) -> Option<Arc<Mutex<Subscription>>> {
         self.0.read().unwrap().by_id.get(id).cloned()
     }
-
-    fn add_id(&self, id: String, url: &str) {
-        let mut subs = self.0.write().unwrap();
-        let sub = subs.by_url[url].clone();
-        let existing = subs.by_id.insert(id, sub);
-        assert!(existing.is_none());
-    }
 }
 
 struct Subscription {
     url: String,
     id: Option<String>,
-    lease_expires: Option<SystemTime>,
+    state: SubscriptionState,
     notify: Sender<Page>,
 }
 
@@ -88,51 +81,91 @@ impl Subscription {
         Subscription {
             url,
             id: None,
-            lease_expires: None,
+            state: SubscriptionState::None,
             notify,
         }
     }
+}
 
-    fn ensure_subscription(&mut self, subs: &Subscriptions, client: &Client, base_url: &str) {
-        if self.id.is_some() {
-            if self.lease_expires.is_none_or(|e| e > SystemTime::now()) {
-                return;
+fn ensure_subscription(
+    sub: &Arc<Mutex<Subscription>>,
+    subs: &Subscriptions,
+    ClientWrapper(client): &ClientWrapper,
+    base_url: &str,
+) -> Result<(), String> {
+    let mut guard = sub.lock().unwrap();
+    match &guard.state {
+        SubscriptionState::None => {}
+        SubscriptionState::Confirmed { lease_expires } => {
+            if *lease_expires > SystemTime::now() {
+                return Ok(());
             }
         }
-
-        let id = self.id.get_or_insert_with(|| {
-            let id = format!("{:x}", rand::rng().random::<u128>());
-            subs.add_id(id.clone(), &self.url);
-            id
-        });
-        let callback = format!("{base_url}/notify/{id}");
-        let url = self.url.clone();
-
-        let mut notify = self.notify.subscribe();
-        let client = client.clone();
-
-        // FIXME ensure this can't send multiple subscription requests
-        // FIXME handle the case where verification of intent never arrived
-        client.connector().runtime().spawn(async move {
-            let base = Url::parse(&url).unwrap();
-            let mut hub = loop {
-                match &*notify.borrow_and_update() {
-                    Page::Pending => {}
-                    Page::Failed(_) => return,
-                    Page::Ready { hub, .. } => break base.join(hub).unwrap(),
-                }
-                notify.changed().await.unwrap();
-            };
-
-            hub.query_pairs_mut()
-                .append_pair("hub.callback", &callback)
-                .append_pair("hub.mode", "subscribe")
-                .append_pair("hub.topic", &url)
-                .finish();
-            let response = client.post(hub).await.unwrap();
-            assert!(response.status().unwrap() == Status::Accepted);
-        });
+        SubscriptionState::Requested => return Ok(()),
+        SubscriptionState::Failed(err) => return Err(err.to_string()),
     }
+    guard.state = SubscriptionState::Requested;
+
+    let id = guard.id.get_or_insert_with(|| {
+        let id = format!("{:x}", rand::rng().random::<u128>());
+        let existing = subs
+            .0
+            .write()
+            .unwrap()
+            .by_id
+            .insert(id.clone(), sub.clone());
+        assert!(existing.is_none());
+        id
+    });
+    let callback = format!("{base_url}/notify/{id}");
+    let url = guard.url.clone();
+
+    let mut notify = guard.notify.subscribe();
+    drop(guard);
+
+    let sub = sub.clone();
+    let client = client.clone();
+
+    // FIXME handle the case where verification of intent never arrived
+    client.connector().runtime().spawn(async move {
+        let base = Url::parse(&url).unwrap();
+        let mut hub = loop {
+            match &*notify.borrow_and_update() {
+                Page::Pending => {}
+                Page::Failed(_) => return,
+                Page::Ready { hub, .. } => break base.join(hub).unwrap(),
+            }
+            notify.changed().await.unwrap();
+        };
+
+        hub.query_pairs_mut()
+            .append_pair("hub.callback", &callback)
+            .append_pair("hub.mode", "subscribe")
+            .append_pair("hub.topic", &url)
+            .finish();
+
+        let err = match client.post(hub).await {
+            Ok(response) => {
+                let status = response.status().unwrap();
+                if status == Status::Accepted {
+                    return;
+                }
+                trillium_client::Error::Other(format!("hub returned status {status}").into())
+            }
+            Err(err) => err,
+        };
+
+        sub.lock().unwrap().state = SubscriptionState::Failed(err);
+    });
+
+    Ok(())
+}
+
+enum SubscriptionState {
+    None,
+    Requested,
+    Confirmed { lease_expires: SystemTime },
+    Failed(trillium_client::Error),
 }
 
 enum Page {
@@ -234,14 +267,19 @@ async fn verify_intent(conn: Conn) -> Conn {
     match &*conn_unwrap!(mode, conn) {
         "subscribe" => {
             let lease_seconds = conn_try!(lease_seconds.parse(), conn);
-            sub.lease_expires = Some(SystemTime::now() + Duration::from_secs(lease_seconds))
+            let lease_expires = SystemTime::now() + Duration::from_secs(lease_seconds);
+            sub.state = SubscriptionState::Confirmed { lease_expires };
         }
         "unsubscribe" => {
             subs.0.write().unwrap().by_id.remove(id);
             sub.id = None;
-            sub.lease_expires = None;
+            sub.state = SubscriptionState::None;
         }
-        "denied" => todo!(),
+        "denied" => {
+            sub.state = SubscriptionState::Failed(trillium_client::Error::Other(
+                "hub denied subscription".into(),
+            ));
+        }
         _ => return conn,
     }
 
@@ -266,7 +304,6 @@ async fn notify(mut conn: Conn) -> Conn {
 
 async fn wait_for_hash_change(mut conn: Conn) -> Conn {
     let subs: &Subscriptions = conn.shared_state().unwrap();
-    let ClientWrapper(client) = conn.shared_state().unwrap();
     // TODO append query string
     let url = conn.wildcard().unwrap().to_owned();
     let expected_hash = conn
@@ -278,13 +315,10 @@ async fn wait_for_hash_change(mut conn: Conn) -> Conn {
         if conn.is_secure() { "https" } else { "http" },
         conn.host().unwrap()
     );
-    let sub = subs.by_url(&url, client);
+    let sub = subs.by_url(&url, conn.shared_state().unwrap());
     let mut notify = {
-        let mut sub = sub.lock().unwrap();
+        let sub = sub.lock().unwrap();
         debug_assert_eq!(sub.url, url);
-        if expected_hash != ContentHash::default() {
-            sub.ensure_subscription(subs, client, &base_url);
-        }
         sub.notify.subscribe()
     };
     loop {
@@ -311,7 +345,23 @@ async fn wait_for_hash_change(mut conn: Conn) -> Conn {
             }
             _ => {}
         }
+        if expected_hash != ContentHash::default() {
+            if let Err(err) = ensure_subscription(
+                &sub,
+                conn.shared_state().unwrap(),
+                conn.shared_state().unwrap(),
+                &base_url,
+            ) {
+                return conn
+                    .with_status(Status::BadGateway)
+                    .with_body(format!(
+                        "could not subscribe to updates for this page: {err}"
+                    ))
+                    .halt();
+            }
+        }
         // wait until the page changes, but interrupt at server shutdown or client disconnect
+        // FIXME also wake up if the subscription status changes, I guess?
         let Some(Some(Ok(()))) = conn
             .cancel_on_disconnect(conn.swansong().interrupt(notify.changed()))
             .await
