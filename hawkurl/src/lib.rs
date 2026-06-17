@@ -33,12 +33,18 @@ impl Subscriptions {
         if let Some(sub) = self.0.read().unwrap().by_url.get(url) {
             sub.clone()
         } else {
-            self.0
-                .write()
-                .unwrap()
-                .by_url
+            let mut subs = self.0.write().unwrap();
+            let Inner { by_url, by_id } = &mut *subs;
+            by_url
                 .entry(url.to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(Subscription::new(url.to_owned(), client))))
+                .or_insert_with(|| {
+                    let sub = Subscription::new(url.to_owned(), client);
+                    let id = sub.id.clone();
+                    let sub = Arc::new(Mutex::new(sub));
+                    let existing = by_id.insert(id, sub.clone());
+                    assert!(existing.is_none());
+                    sub
+                })
                 .clone()
         }
     }
@@ -50,7 +56,7 @@ impl Subscriptions {
 
 struct Subscription {
     url: String,
-    id: Option<String>,
+    id: String,
     state: SubscriptionState,
     notify: Sender<Page>,
 }
@@ -78,9 +84,10 @@ impl Subscription {
                 notify.send_replace(page);
             }
         });
+
         Subscription {
             url,
-            id: None,
+            id: format!("{:x}", rand::rng().random::<u128>()),
             state: SubscriptionState::None,
             notify,
         }
@@ -89,7 +96,6 @@ impl Subscription {
 
 fn ensure_subscription(
     sub: &Arc<Mutex<Subscription>>,
-    subs: &Subscriptions,
     ClientWrapper(client): &ClientWrapper,
     base_url: &str,
 ) -> Result<(), String> {
@@ -106,20 +112,8 @@ fn ensure_subscription(
     }
     guard.state = SubscriptionState::Requested;
 
-    let id = guard.id.get_or_insert_with(|| {
-        let id = format!("{:x}", rand::rng().random::<u128>());
-        let existing = subs
-            .0
-            .write()
-            .unwrap()
-            .by_id
-            .insert(id.clone(), sub.clone());
-        assert!(existing.is_none());
-        id
-    });
-    let callback = format!("{base_url}/notify/{id}");
+    let callback = format!("{base_url}/notify/{}", &guard.id);
     let url = guard.url.clone();
-
     let mut notify = guard.notify.subscribe();
     drop(guard);
 
@@ -247,7 +241,7 @@ async fn verify_intent(conn: Conn) -> Conn {
     let id = conn.param("id").unwrap();
     let sub = conn_unwrap!(subs.by_id(id), conn);
     let mut sub = sub.lock().unwrap();
-    debug_assert_eq!(sub.id.as_deref(), Some(id));
+    debug_assert_eq!(&sub.id, id);
 
     let mut mode = None;
     let mut challenge = None;
@@ -271,8 +265,6 @@ async fn verify_intent(conn: Conn) -> Conn {
             sub.state = SubscriptionState::Confirmed { lease_expires };
         }
         "unsubscribe" => {
-            subs.0.write().unwrap().by_id.remove(id);
-            sub.id = None;
             sub.state = SubscriptionState::None;
         }
         "denied" => {
@@ -296,7 +288,7 @@ async fn notify(mut conn: Conn) -> Conn {
         return conn.with_status(Status::Gone).halt();
     };
     let sub = sub.lock().unwrap();
-    debug_assert_eq!(sub.id.as_deref(), Some(id));
+    debug_assert_eq!(&sub.id, id);
     sub.notify
         .send_replace(Page::from_http(content, conn.request_headers()));
     conn.ok("")
@@ -346,12 +338,7 @@ async fn wait_for_hash_change(mut conn: Conn) -> Conn {
             _ => {}
         }
         if expected_hash != ContentHash::default() {
-            if let Err(err) = ensure_subscription(
-                &sub,
-                conn.shared_state().unwrap(),
-                conn.shared_state().unwrap(),
-                &base_url,
-            ) {
+            if let Err(err) = ensure_subscription(&sub, conn.shared_state().unwrap(), &base_url) {
                 return conn
                     .with_status(Status::BadGateway)
                     .with_body(format!(
